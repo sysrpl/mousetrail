@@ -1,0 +1,7 @@
+{
+    "uuid": "mousetrail@local",
+    "name": "Mouse Trail",
+    "description": "Configure the mouse and keystroke overlay",
+    "icon": "input-mouse",
+    "max-instances": 1
+}
