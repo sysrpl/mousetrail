@@ -41,47 +41,6 @@ appearance settings. Changes take effect while the overlay is running.
 If you already run `mousetrail.py` from a terminal or session autostart, stop
 that copy before adding the applet so only one overlay is displayed.
 
-## Publishing to Cinnamon Spices
-
-The local UUID, `mousetrail@local`, is for development. For a Spices
-submission, use your GitHub username as the UUID suffix and provide a real
-screenshot and a square PNG for the applet selection window. The project's MIT
-`LICENSE` is included automatically. Do not use an image you do not have rights
-to redistribute.
-
-```bash
-python3 package-spice.py \
-  --author YOUR_GITHUB_USERNAME \
-  --icon-png chooser-icon.png \
-  --screenshot screenshot.png
-```
-
-This creates `dist/spice/mousetrail@YOUR_GITHUB_USERNAME/` for a pull request
-and `dist/spice/mousetrail@YOUR_GITHUB_USERNAME.zip` for manual installation.
-Copy the directory into a fork of
-[linuxmint/cinnamon-spices-applets](https://github.com/linuxmint/cinnamon-spices-applets),
-run its `./validate-spice mousetrail@YOUR_GITHUB_USERNAME` command, and open a
-pull request containing this one applet. The packaging command adjusts the UUID
-in the applet and Python helper, and removes the local `metadata.json` icon
-field because the Spices validator requires `icon.png` instead.
-
-## Project files
-
-| Path | Purpose |
-| --- | --- |
-| `mousetrail.py` | The overlay itself; runs standalone or as the applet's helper |
-| `cinnamon-applet/mousetrail@local/` | Applet source: `applet.js`, `metadata.json`, `settings-schema.json`, panel icons |
-| `active.svg`, `inactive.svg` | Editable panel icon sources; copy them into the applet's `icons/` as `mousetrail-active-symbolic.svg` and `mousetrail-inactive-symbolic.svg` |
-| `install-applet.sh` | Installs the local applet into `~/.local/share/cinnamon/applets/` |
-| `package-spice.py` | Builds the Spices submission and ZIP in `dist/spice/` |
-| `SPICES_README.md` | README shipped with the Spices submission |
-| `chooser-icon.png`, `CHOOSER_ICON_CREDIT.md` | Applet selection icon and its license credit |
-| `screenshot.png` | Screenshot for the Spices website |
-
-`dist/` and `__pycache__/` are generated and can be deleted at any time.
-`package-spice.py` refuses to overwrite an existing output directory, so remove
-`dist/spice/` (or pass a new `--output`) before rebuilding.
-
 ## Requirements
 
 Already present on a stock Linux Mint install, so there is nothing to
