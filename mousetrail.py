@@ -27,7 +27,8 @@ import gi
 
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
-from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
+gi.require_version("GdkX11", "3.0")
+from gi.repository import Gdk, GdkX11, Gio, GLib, Gtk  # noqa: E402,F401
 
 import cairo  # noqa: E402
 from Xlib import X, XK, display as xdisplay  # noqa: E402
@@ -256,6 +257,13 @@ class Overlay(Gtk.Window):
         del self.keys[:-MAX_KEYS]
         self.damage_strip()
 
+    def raise_to_top(self):
+        """Restack above a menu or tooltip that just opened over us."""
+        window = self.get_window()
+        if window is not None:
+            window.raise_()
+        return False
+
     # -- damage -------------------------------------------------------------
     def damage_circle(self, center):
         cx, cy = center
@@ -476,6 +484,36 @@ class InputWatcher(threading.Thread):
         return SPECIAL_BY_KEYSYM.get(keysym)
 
 
+class StackWatcher(threading.Thread):
+    """Keeps the overlay above menus and tooltips as they open.
+
+    The overlay is override-redirect, so the window manager ignores keep-above
+    for it. Other override-redirect windows (menus, tooltips) stack in the
+    order they are mapped or raised, so each one that appears would cover the
+    overlay unless we raise it again.
+    """
+
+    daemon = True
+
+    def __init__(self, overlay_xid, on_restack):
+        super().__init__()
+        self.overlay_xid = overlay_xid
+        self.on_restack = on_restack
+        self.stack_display = xdisplay.Display()
+        self.stack_display.screen().root.change_attributes(
+            event_mask=X.SubstructureNotifyMask)
+
+    def run(self):
+        while True:
+            event = self.stack_display.next_event()
+            # Managed windows always sit below us; only override-redirect
+            # windows can land on top, by being mapped or raised.
+            if (event.type in (X.MapNotify, X.ConfigureNotify) and
+                    event.override and
+                    event.window.id != self.overlay_xid):
+                GLib.idle_add(self.on_restack)
+
+
 class ConfigWatcher:
     """Apply Cinnamon's settings file without restarting the overlay."""
 
@@ -580,6 +618,8 @@ def main():
 
             GLib.timeout_add_seconds(1, check_parent)
         InputWatcher(overlay.flash, overlay.add_key, overlay.toggle).start()
+        StackWatcher(overlay.get_window().get_xid(),
+                     overlay.raise_to_top).start()
         Gtk.main()
     finally:
         os.close(lock_fd)
