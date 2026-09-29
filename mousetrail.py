@@ -31,7 +31,7 @@ gi.require_version("GdkX11", "3.0")
 from gi.repository import Gdk, GdkX11, Gio, GLib, Gtk  # noqa: E402,F401
 
 import cairo  # noqa: E402
-from Xlib import X, XK, display as xdisplay  # noqa: E402
+from Xlib import X, XK, display as xdisplay, error as xerror  # noqa: E402
 from Xlib.ext import record  # noqa: E402
 from Xlib.protocol import rq  # noqa: E402
 
@@ -63,6 +63,18 @@ FPS = 60
 IGNORE_SCROLL = True     # don't flash on wheel scroll (buttons 4-7)
 SHOW_KEYS = True         # set False for a mouse-only overlay
 TOGGLE_KEY = "grave"     # the ` key: hides/shows the overlay, never drawn
+
+# The lock screen's window (its _NET_WM_NAME); the overlay never raises over it.
+SCREENSAVER_WINDOW_NAME = b"cinnamon-screensaver-window"
+# Times a second one window may cover the overlay before it's left on top.
+FIGHT_LIMIT = 10
+
+# Largest values the settings may ask for.
+MAX_DIAMETER = 500       # px
+MAX_STROKE = 50          # px
+MAX_FONT_SIZE = 200      # px
+MAX_MARGIN = 1000        # px
+MAX_DURATION = 10.0      # seconds
 
 # Half-width of the area repainted around the cursor each frame.
 DAMAGE = CLICK_DIAMETER // 2 + STROKE + 2
@@ -108,6 +120,10 @@ for _name, _label in SPECIAL_KEYS.items():
     _ks = XK.string_to_keysym(_name)
     if _ks:
         SPECIAL_BY_KEYSYM[_ks] = _label
+
+
+def clamp(value, low, high):
+    return min(high, max(low, value))
 
 
 def ease_in_out_sine(x):
@@ -491,6 +507,11 @@ class StackWatcher(threading.Thread):
     for it. Other override-redirect windows (menus, tooltips) stack in the
     order they are mapped or raised, so each one that appears would cover the
     overlay unless we raise it again.
+
+    Some windows raise themselves right back whenever they're covered (a lock
+    screen, some overlays). Answering them would never end, so the lock screen
+    is always left on top, and any other window that covers the overlay more
+    than FIGHT_LIMIT times a second is left on top from then on.
     """
 
     daemon = True
@@ -502,16 +523,92 @@ class StackWatcher(threading.Thread):
         self.stack_display = xdisplay.Display()
         self.stack_display.screen().root.change_attributes(
             event_mask=X.SubstructureNotifyMask)
+        self.net_wm_name = self.stack_display.intern_atom("_NET_WM_NAME")
+        self.utf8_string = self.stack_display.intern_atom("UTF8_STRING")
+        self.screensavers = set()
+        self.covered_at = {}    # window id -> times it covered us, last second
+        self.given_up = set()   # windows we no longer raise over
+        # One raise waiting on the main loop is enough, however many events
+        # arrive before it runs.
+        self.raise_pending = False
 
     def run(self):
-        while True:
-            event = self.stack_display.next_event()
-            # Managed windows always sit below us; only override-redirect
-            # windows can land on top, by being mapped or raised.
-            if (event.type in (X.MapNotify, X.ConfigureNotify) and
-                    event.override and
-                    event.window.id != self.overlay_xid):
-                GLib.idle_add(self.on_restack)
+        try:
+            while True:
+                event = self.stack_display.next_event()
+                try:
+                    self.handle(event)
+                except xerror.XError as exc:
+                    print("mousetrail: keeping the overlay on top: %s" % exc,
+                          file=sys.stderr)
+        except xerror.ConnectionClosedError as exc:
+            print("mousetrail: lost the X connection that keeps the overlay "
+                  "on top: %s" % exc, file=sys.stderr)
+
+    def handle(self, event):
+        if event.type == X.DestroyNotify:
+            # Window ids get reused; forget what we knew about this one.
+            self.screensavers.discard(event.window.id)
+            self.given_up.discard(event.window.id)
+            self.covered_at.pop(event.window.id, None)
+            return
+        # Managed windows always sit below us; only override-redirect
+        # windows can land on top, by being mapped or raised.
+        if (event.type in (X.MapNotify, X.ConfigureNotify) and
+                event.override and
+                event.window.id != self.overlay_xid and
+                not self.is_screensaver(event.window) and
+                not self.is_fighting(event.window.id) and
+                not self.raise_pending):
+            self.raise_pending = True
+            GLib.idle_add(self.restack)
+
+    def restack(self):
+        """On the main loop: the raise that was waiting."""
+        self.raise_pending = False
+        self.on_restack()
+        return False
+
+    def is_fighting(self, window_id):
+        """Whether the window keeps covering the overlay: then it's left on top."""
+        if window_id in self.given_up:
+            return True
+        now = time.monotonic()
+        times = [t for t in self.covered_at.get(window_id, ()) if now - t < 1.0]
+        times.append(now)
+        if len(times) > FIGHT_LIMIT:
+            self.covered_at.pop(window_id, None)
+            self.given_up.add(window_id)
+            print("mousetrail: window 0x%x keeps covering the overlay; "
+                  "leaving it on top" % window_id, file=sys.stderr)
+            return True
+        self.covered_at[window_id] = times
+        return False
+
+    def is_screensaver(self, window):
+        """Whether the window is the lock screen, which must stay on top.
+
+        cinnamon-screensaver raises its window whenever another one covers
+        it. Raising over it in turn starts a raise war: the two answer each
+        other endlessly, the screensaver's main loop spends all its time on
+        it, and with the keyboard and mouse grabbed by the lock screen the
+        whole desktop stops responding. It names its window before showing
+        it, so it can be recognised from its first MapNotify.
+        """
+        if window.id in self.screensavers:
+            return True
+        try:
+            name = window.get_full_property(self.net_wm_name, self.utf8_string)
+        except xerror.XError:
+            # Already gone: nothing to raise over.
+            return False
+        value = name.value if name is not None else b""
+        if isinstance(value, str):
+            value = value.encode()
+        if value == SCREENSAVER_WINDOW_NAME:
+            self.screensavers.add(window.id)
+            return True
+        return False
 
 
 class ConfigWatcher:
@@ -551,18 +648,20 @@ class ConfigWatcher:
 
         self.overlay.damage_circle(self.overlay.center)
         self.overlay.damage_strip()
-        IDLE_DIAMETER = max(1, int(values["idle-diameter"]))
-        CLICK_DIAMETER = max(IDLE_DIAMETER, int(values["click-diameter"]))
-        STROKE = max(1, int(values["stroke"]))
-        OPACITY = min(1.0, max(0.0, float(values["opacity"])))
+        # Upper limits too: a mistyped size would repaint a huge area every
+        # frame, and a huge duration would keep repainting for minutes.
+        IDLE_DIAMETER = clamp(int(values["idle-diameter"]), 1, MAX_DIAMETER)
+        CLICK_DIAMETER = clamp(int(values["click-diameter"]), IDLE_DIAMETER, MAX_DIAMETER)
+        STROKE = clamp(int(values["stroke"]), 1, MAX_STROKE)
+        OPACITY = clamp(float(values["opacity"]), 0.0, 1.0)
         color = Gdk.RGBA()
         if color.parse(values["color"]):
             COLOR = (color.red, color.green, color.blue)
-        CLICK_DURATION = max(0.05, float(values["click-duration"]))
-        KEY_DURATION = max(0.05, float(values["key-duration"]))
-        KEY_FADE = min(KEY_DURATION, max(0.0, float(values["key-fade"])))
-        KEY_FONT_SIZE = max(1, int(values["key-font-size"]))
-        KEY_BOTTOM_MARGIN = max(0, int(values["key-bottom-margin"]))
+        CLICK_DURATION = clamp(float(values["click-duration"]), 0.05, MAX_DURATION)
+        KEY_DURATION = clamp(float(values["key-duration"]), 0.05, MAX_DURATION)
+        KEY_FADE = clamp(float(values["key-fade"]), 0.0, KEY_DURATION)
+        KEY_FONT_SIZE = clamp(int(values["key-font-size"]), 1, MAX_FONT_SIZE)
+        KEY_BOTTOM_MARGIN = clamp(int(values["key-bottom-margin"]), 0, MAX_MARGIN)
         SHOW_KEYS = bool(values["show-keys"])
         if not SHOW_KEYS:
             self.overlay.keys = []
