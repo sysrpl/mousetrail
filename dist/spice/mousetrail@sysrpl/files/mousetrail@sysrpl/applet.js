@@ -16,10 +16,9 @@ class MouseTrailApplet extends Applet.IconApplet {
         this._statusPath = GLib.build_filenamev([
             GLib.get_user_runtime_dir(), "mousetrail-" + instanceId + ".status"
         ]);
-        this._configPath = GLib.build_filenamev([
-            GLib.get_home_dir(), ".cinnamon", "configs", UUID,
-            UUID + ".json"
-        ]);
+        // Ask Cinnamon which settings file it uses: newer versions keep it
+        // in ~/.config/cinnamon/spices, older ones in ~/.cinnamon/configs.
+        this._configPath = this.settings.file.get_path();
         this._state = null;
         this._process = null;
         this._running = false;
